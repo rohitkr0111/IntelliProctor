@@ -1,11 +1,13 @@
 # Architecture
 
 ```text
-Derived client landmark features
-          ↓
- Flask assessment API ──→ active in-memory session
-          ↓                         ↓
- Personalized baseline scorer ─→ review timeline/report
+Candidate browser (30-minute MCQ assessment)
+    ├─ MediaPipe face landmarks ───┐
+    ├─ MediaPipe phone detector ───┼─ derived signals only ─→ Flask API
+    ├─ window visibility events ───┘                            ├─ personal baseline scorer
+    └─ MCQ selections ──────────────────────────────────────────├─ fixed-rule enforcement
+                                                                  ├─ server-side MCQ grading
+                                                                  └─ SQLite: candidate, answers, grouped report
 ```
 
-The MVP excludes raw video and facial identity storage by design. The scorer measures only changes from a calibration distribution and returns LOW_RISK, REVIEW, or HIGH_RISK review-signal bands. Context may lower a score; it cannot make a result more punitive.
+The browser never sends raw camera frames. The baseline learns the candidate’s own variation during calibration; it is separate from transparent policy rules for a phone, repeated multiple faces, and repeatedly leaving the assessment window. Session termination prevents further scoring for that assessment ID, but does not prove misconduct or control the candidate’s browser outside this app.

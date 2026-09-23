@@ -3,113 +3,86 @@ import { FaceLandmarker, FilesetResolver, ObjectDetector } from "https://cdn.jsd
 const API = "";
 const $ = (id) => document.getElementById(id);
 const video = $("camera");
-let assessmentId, landmarker, objectDetector, stream, scoringTimer, countdownTimer, lastTypingAt = 0, elevatedSamples = 0, remainingSeconds = 600, assessmentFinished = false;
+const candidateStages = ["welcomeView", "preflightView", "calibrationView", "examView", "terminationView", "completionView"];
+let assessmentId, landmarker, objectDetector, stream, monitoringTimer, countdownTimer;
+let questions = [], answers = {}, questionIndex = 0, remainingSeconds = 30 * 60;
+let lastFeatures = null, lastFaceCount = 0, assessmentFinished = false, currentReport = null;
 
 function show(message) { $("message").textContent = message; }
-function renderTimer() { const minutes = String(Math.floor(remainingSeconds / 60)).padStart(2, "0"), seconds = String(remainingSeconds % 60).padStart(2, "0"); $("assessmentTimer").textContent = `${minutes}:${seconds}`; }
-function startCountdown() { renderTimer(); countdownTimer = setInterval(() => { remainingSeconds -= 1; renderTimer(); if (remainingSeconds <= 0) finishAssessment("Time has expired. Your assessment has been submitted."); }, 1000); }
-function stopMonitoring() { clearInterval(scoringTimer); scoringTimer = null; }
-function stopCamera() { stream?.getTracks().forEach((track) => track.stop()); $("cameraState").textContent = "Camera session ended"; }
+function candidate() { return { name: $("candidateName").value.trim(), email: $("candidateEmail").value.trim(), consent: $("consent").checked }; }
+function validCheckin() { const data = candidate(); return data.name.length >= 2 && /^\S+@\S+\.\S+$/.test(data.email) && data.consent; }
+function setCandidateStage(id) { candidateStages.forEach((stage) => $(stage).classList.toggle("hidden", stage !== id)); }
 function updateIndiaTime() { $("indiaTime").textContent = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }).format(new Date()); }
-updateIndiaTime(); setInterval(updateIndiaTime, 1000);
-function landmarkFeature(points) {
-  // Normalized landmark ratios reduce the impact of camera position.
-  const p = (index) => points[index];
-  const left = p(234), right = p(454), nose = p(1), forehead = p(10), chin = p(152);
-  const width = Math.max(right.x - left.x, .001), height = Math.max(chin.y - forehead.y, .001);
-  const leftIris = p(468), rightIris = p(473);
-  return {
-    gaze_x: ((leftIris.x + rightIris.x) / 2 - (p(33).x + p(263).x) / 2) / width,
-    gaze_y: ((leftIris.y + rightIris.y) / 2 - forehead.y) / height,
-    head_yaw: (nose.x - (left.x + right.x) / 2) / width,
-    head_pitch: (nose.y - (forehead.y + chin.y) / 2) / height,
-    head_roll: (p(33).y - p(263).y) / width,
-    face_scale: width,
-  };
-}
-function currentFeatures() {
-  if (!landmarker || video.readyState < 2) return null;
-  const result = landmarker.detectForVideo(video, performance.now());
-  return result.faceLandmarks?.[0] ? landmarkFeature(result.faceLandmarks[0]) : null;
-}
-function phoneDetected() {
-  if (!objectDetector || video.readyState < 2) return false;
-  const result = objectDetector.detectForVideo(video, performance.now());
-  return result.detections.some((detection) => detection.categories.some((category) => category.categoryName === "cell phone" && category.score >= 0.45));
-}
-function dot(score) { const item = document.createElement("i"); item.style.height = `${18 + score * 65}px`; item.className = score < .3 ? "low" : score < .6 ? "review" : "high"; $("timeline").append(item); }
-function updateSessionCheck(data) {
-  const isNormal = data.status === "LOW_RISK";
-  const isElevated = data.status === "HIGH_RISK";
-  elevatedSamples = isElevated ? elevatedSamples + 1 : 0;
-  const copy = isNormal
-    ? ["✓", "Everything looks normal", "Your movement is within the range established during calibration."]
-    : isElevated
-      ? ["!", "Please re-centre for the assessment", "We noticed a continued change from your usual camera position. Check your lighting and make sure you are comfortably in frame."]
-      : ["…", "Quick camera check", "A temporary change was noticed. Continue naturally; no action is needed unless you see a warning."];
-  $("signalIcon").textContent = copy[0]; $("signalTitle").textContent = copy[1]; $("signalText").textContent = copy[2];
-  $("status").textContent = isNormal ? "ALL CLEAR" : isElevated ? "PLEASE CHECK" : "MONITORING";
-  $("status").className = `badge ${isNormal ? "low" : isElevated ? "high" : "review"}`;
-  $("explanation").textContent = isNormal ? "No action needed." : "This is a session-quality prompt, not an accusation or automated decision.";
-  $("warning").classList.toggle("hidden", elevatedSamples < 3);
-}
-function endSession(reason) {
-  if (assessmentFinished) return;
-  assessmentFinished = true; stopMonitoring(); clearInterval(countdownTimer); $("score").disabled = true; $("score").textContent = "Session ended"; $("finish").disabled = true;
-  $("signalIcon").textContent = "■"; $("signalTitle").textContent = "This session has ended";
-  $("signalText").textContent = reason || "A sustained, very large change from your personal calibration range was detected. Please contact the assessment supervisor for next steps.";
-  $("status").textContent = "SESSION ENDED"; $("status").className = "badge high";
-  $("warningTitle").textContent = "Assessment session ended"; $("warningText").textContent = "Please stop the assessment and contact your supervisor. A human review is required."; $("warning").classList.remove("hidden"); stopCamera(); showReport();
-}
-function renderReport(report) {
-  const content = $("reportContent"); content.replaceChildren();
-  const status = document.createElement("div"); const terminated = report.report_status === "SESSION_TERMINATED";
-  status.className = `report-status ${terminated ? "terminated" : "completed"}`;
-  status.textContent = terminated ? "SESSION TERMINATED" : report.report_status === "ASSESSMENT_COMPLETED" ? "ASSESSMENT COMPLETED" : "ASSESSMENT IN PROGRESS"; content.append(status);
-  for (const warning of report.warnings) { const item = document.createElement("div"); item.className = "report-warning"; const title = document.createElement("strong"); title.textContent = warning.title; const message = document.createElement("p"); message.textContent = warning.message; item.append(title, message); content.append(item); }
-  const heading = document.createElement("h3"); heading.textContent = report.flagged_incidents.length ? "Flagged incidents" : "No flagged incidents"; content.append(heading);
-  if (report.flagged_incidents.length) { const list = document.createElement("ul"); list.className = "incident-list"; for (const incident of report.flagged_incidents) { const line = document.createElement("li"); line.textContent = `${incident.status.replaceAll("_", " ")} — ${incident.checks} confirmed check${incident.checks === 1 ? "" : "s"}, from ${new Date(incident.started_at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}.`; list.append(line); } content.append(list); }
-  const note = document.createElement("p"); note.className = "small"; note.textContent = report.recommendation; content.append(note);
-}
-async function showReport() { const response = await fetch(`${API}/api/assessment/report?assessment_id=${assessmentId}`); const data = await response.json(); $("reportBox").classList.remove("hidden"); renderReport(data); }
-function startMonitoring() { if (scoringTimer || assessmentFinished) return; sendScore(); scoringTimer = setInterval(sendScore, 2000); $("score").textContent = "Pause session check"; }
-async function finishAssessment(message = "Assessment submitted. Your grouped session summary is ready.") { if (assessmentFinished) return; assessmentFinished = true; stopMonitoring(); clearInterval(countdownTimer); $("score").disabled = true; $("score").textContent = "Assessment complete"; $("finish").disabled = true; $("status").textContent = "SUBMITTED"; $("status").className = "badge low"; $("signalIcon").textContent = "✓"; $("signalTitle").textContent = "Assessment submitted"; $("signalText").textContent = "Your response remains in this browser. The summary shows only grouped session incidents."; stopCamera(); show(message); await fetch(`${API}/api/assessment/finish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assessment_id: assessmentId }) }); showReport(); }
-async function sendScore() {
-  const features = currentFeatures();
-  if (!features) return show("No face landmarks detected. Centre your face and improve lighting.");
-  const typing = Date.now() - lastTypingAt < 2200;
-  $("typingState").textContent = `Typing activity: ${typing ? "active" : "idle"} (local only)`;
-  const prohibitedObject = phoneDetected();
-  const context = { typing, difficulty: $("difficulty").value, gaze_direction: "center", prohibited_object: prohibitedObject };
-  if (prohibitedObject) show("Mobile phone detected. Please remove it from the camera view immediately.");
-  const response = await fetch(`${API}/api/assessment/score_frame`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assessment_id: assessmentId, features, context }) });
-  const data = await response.json(); if (!response.ok) return show(data.error);
-  updateSessionCheck(data); dot(data.anomaly_score); if (data.session_ended) endSession(data.termination_reason);
-}
+function renderTimer() { const minutes = String(Math.max(0, Math.floor(remainingSeconds / 60))).padStart(2, "0"); const seconds = String(Math.max(0, remainingSeconds % 60)).padStart(2, "0"); $("assessmentTimer").textContent = `${minutes}:${seconds}`; }
+function stopMonitoring() { clearInterval(monitoringTimer); monitoringTimer = null; clearInterval(countdownTimer); countdownTimer = null; }
+function stopCamera() { stream?.getTracks().forEach((track) => track.stop()); $("cameraState").textContent = "Camera session ended"; }
+function setRequirement(id, ready) { const icon = $(id).querySelector("span"); icon.textContent = ready ? "✓" : "○"; icon.className = ready ? "check-ok" : ""; }
+function setProctorCheck(id, clear, detail) { const icon = $(id); icon.textContent = clear ? "✓" : "!"; icon.className = `check-icon ${clear ? "check-ok" : "check-alert"}`; if (detail) icon.parentElement.querySelector("small").textContent = detail; }
 
-$("cameraButton").onclick = async () => {
-  try {
-    show("Loading on-device face landmark model…");
-    const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-    landmarker = await FaceLandmarker.createFromOptions(vision, { baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task" }, runningMode: "VIDEO", numFaces: 1 });
-    try {
-      objectDetector = await ObjectDetector.createFromOptions(vision, { baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/latest/efficientdet_lite0.tflite" }, runningMode: "VIDEO", scoreThreshold: 0.45, categoryAllowlist: ["cell phone"] });
-    } catch (objectError) { objectDetector = null; show("Camera is ready, but the mobile-phone detector could not load. Check your internet connection and restart the session."); }
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 640, height: 480 }, audio: false });
-    video.srcObject = stream; await video.play(); $("cameraState").textContent = objectDetector ? "Face and mobile-phone detection active" : "Face detection active — phone detection unavailable";
-    $("cameraButton").disabled = true; $("baseline").disabled = false; show("Camera ready. Begin calibration when you are comfortable.");
-  } catch (error) { show(`Camera setup failed: ${error.message}. Allow camera permission and use a secure/local origin.`); }
-};
-$("baseline").onclick = async () => {
-  $("baseline").disabled = true; show("Calibrating for 12 seconds. Stay naturally in frame; no footage is uploaded.");
-  const samples = [];
-  await new Promise((resolve) => { const timer = setInterval(() => { const value = currentFeatures(); if (value) samples.push(value); if (samples.length >= 40) { clearInterval(timer); resolve(); } }, 300); });
-  if (samples.length < 10) { $("baseline").disabled = false; return show("Calibration needs a stable face view. Try again."); }
-  const response = await fetch(`${API}/api/assessment/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ samples }) }); const data = await response.json();
-  if (!response.ok) { $("baseline").disabled = false; return show(data.error); }
-  assessmentId = data.assessment_id; $("score").disabled = false; $("finish").disabled = false; startCountdown(); startMonitoring(); show(`Personal baseline established from ${data.sample_count} samples. The 10-minute assessment and background session check have started.`);
-};
-$("score").onclick = () => { if (scoringTimer) { stopMonitoring(); $("score").textContent = "3. Resume session check"; show("Background session check paused."); return; } startMonitoring(); show("Background session check resumed."); };
-$("finish").onclick = () => finishAssessment();
-$("response").addEventListener("input", () => { lastTypingAt = Date.now(); $("typingState").textContent = "Typing activity: active (local only)"; });
-window.addEventListener("beforeunload", stopCamera);
+updateIndiaTime(); setInterval(updateIndiaTime, 1000); renderTimer();
+
+function landmarkFeature(points) {
+  const p = (index) => points[index]; const left = p(234), right = p(454), nose = p(1), forehead = p(10), chin = p(152);
+  const width = Math.max(right.x - left.x, .001), height = Math.max(chin.y - forehead.y, .001); const leftIris = p(468), rightIris = p(473);
+  return { gaze_x: ((leftIris.x + rightIris.x) / 2 - (p(33).x + p(263).x) / 2) / width, gaze_y: ((leftIris.y + rightIris.y) / 2 - forehead.y) / height, head_yaw: (nose.x - (left.x + right.x) / 2) / width, head_pitch: (nose.y - (forehead.y + chin.y) / 2) / height, head_roll: (p(33).y - p(263).y) / width, face_scale: width };
+}
+function currentFeatures() { if (!landmarker || video.readyState < 2) return null; const result = landmarker.detectForVideo(video, performance.now()); lastFaceCount = result.faceLandmarks?.length || 0; lastFeatures = result.faceLandmarks?.[0] ? landmarkFeature(result.faceLandmarks[0]) : null; return lastFeatures; }
+function phoneDetected() { if (!objectDetector || video.readyState < 2) return false; const result = objectDetector.detectForVideo(video, performance.now()); return result.detections.some((detection) => detection.categories.some((category) => category.categoryName === "cell phone" && category.score >= .45)); }
+
+function renderQuestionNavigator() {
+  $("questionNumbers").replaceChildren();
+  questions.forEach((question, index) => { const button = document.createElement("button"); button.className = `question-number ${index === questionIndex ? "current" : ""} ${answers[question.id] !== undefined ? "answered" : ""}`; button.textContent = index + 1; button.addEventListener("click", () => { questionIndex = index; renderQuestion(); }); $("questionNumbers").append(button); });
+}
+function renderQuestion() {
+  const question = questions[questionIndex]; if (!question) return;
+  $("questionTopic").textContent = `${question.topic.toUpperCase()} · ${question.difficulty.toUpperCase()}`; $("questionPosition").textContent = `QUESTION ${questionIndex + 1} OF ${questions.length}`; $("questionPrompt").textContent = question.prompt; $("options").replaceChildren();
+  question.options.forEach((option, index) => { const label = document.createElement("label"); label.className = "option"; const input = document.createElement("input"); input.type = "radio"; input.name = "answer"; input.checked = answers[question.id] === index; input.addEventListener("change", () => { answers[question.id] = index; renderQuestionNavigator(); saveAnswer(question.id, index); }); const letter = document.createElement("b"); letter.textContent = String.fromCharCode(65 + index); const text = document.createElement("span"); text.textContent = option; label.append(input, letter, text); $("options").append(label); });
+  $("previous").disabled = questionIndex === 0; $("next").textContent = questionIndex === questions.length - 1 ? "Review & submit →" : "Next question →"; renderQuestionNavigator();
+}
+async function saveAnswer(questionId, selectedOption) { if (!assessmentId || assessmentFinished) return; $("saveState").textContent = "● Saving answer…"; try { const response = await fetch(`${API}/api/assessment/answer`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assessment_id: assessmentId, question_id: questionId, selected_option: selectedOption }) }); if (!response.ok) throw new Error(); $("saveState").textContent = "● Answer saved"; } catch { $("saveState").textContent = "! Answer save failed"; } }
+
+function updateProctor(data) {
+  const low = data.status === "LOW_RISK", high = data.status === "HIGH_RISK";
+  $("proctorStatus").textContent = low ? "ALL CLEAR" : high ? "CHECK CAMERA" : "MONITORING"; $("proctorStatus").className = `status-pill ${low ? "clear" : high ? "alert" : "review"}`;
+  $("baselineCheck").textContent = low ? "✓" : high ? "!" : "…"; $("baselineCheck").className = `check-icon ${low ? "check-ok" : high ? "check-alert" : ""}`; $("baselineText").textContent = low ? "Within your personal range" : high ? "Large deviation from your range" : "Temporary difference detected";
+}
+async function submitObservation(browserHidden = false) {
+  if (!assessmentId || assessmentFinished) return;
+  const features = currentFeatures() || lastFeatures; if (!features) { setProctorCheck("faceCheck", false, "Face not currently detected"); return; }
+  const phone = phoneDetected(), multipleFaces = lastFaceCount > 1;
+  setProctorCheck("phoneCheck", !phone, phone ? "Phone detected" : "No phone detected"); setProctorCheck("faceCheck", !multipleFaces, multipleFaces ? "More than one face detected" : "One candidate in view"); setProctorCheck("windowCheck", !browserHidden, browserHidden ? "Assessment window left" : "Assessment window active");
+  const context = { typing: false, difficulty: questions[questionIndex]?.difficulty || "medium", gaze_direction: "center", prohibited_object: phone, multiple_faces: multipleFaces, browser_hidden: browserHidden };
+  try { const response = await fetch(`${API}/api/assessment/score_frame`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assessment_id: assessmentId, features, context }) }); const data = await response.json(); if (!response.ok) { if (data.session_ended) await terminate(data.error); return; } updateProctor(data); if (data.session_ended) await terminate(data.termination_reason); } catch { $("proctorStatus").textContent = "CONNECTION LOST"; $("proctorStatus").className = "status-pill alert"; }
+}
+function startTimer() { renderTimer(); countdownTimer = setInterval(() => { remainingSeconds -= 1; renderTimer(); if (remainingSeconds <= 0) complete("Time expired. Your answers were submitted automatically."); }, 1000); }
+async function finishOnServer() { const response = await fetch(`${API}/api/assessment/finish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assessment_id: assessmentId, answers }) }); return response.json(); }
+async function getReport() { const response = await fetch(`${API}/api/assessment/report?assessment_id=${assessmentId}`); return response.json(); }
+function showExamOutcome(id) { setCandidateStage(id); window.scrollTo({ top: 0, behavior: "smooth" }); }
+async function terminate(reason) { if (assessmentFinished) return; assessmentFinished = true; stopMonitoring(); stopCamera(); await finishOnServer(); currentReport = await getReport(); $("terminationText").textContent = "The assessment has been ended by an integrity policy."; $("terminationIncident").textContent = reason || "An integrity policy was triggered."; $("terminationTitle").textContent = currentReport.warnings?.[0]?.title || "Assessment session terminated"; showExamOutcome("terminationView"); }
+async function complete(message = "Your answers have been submitted.") { if (assessmentFinished) return; assessmentFinished = true; stopMonitoring(); stopCamera(); const result = await finishOnServer(); currentReport = await getReport(); if (result.status === "session_terminated" || currentReport.report_status === "SESSION_TERMINATED") { assessmentFinished = false; await terminate(currentReport.termination_reason); return; } $("completionView").querySelector("p:not(.eyebrow)").textContent = `${message} Your answers, technical score, and grouped integrity summary have been saved locally.`; showExamOutcome("completionView"); }
+
+function reportRow(parent, label, value) { const row = document.createElement("div"); row.className = "report-row"; const strong = document.createElement("strong"); strong.textContent = label; const text = document.createElement("span"); text.textContent = value; row.append(strong, text); parent.append(row); }
+function renderReport(report) {
+  const content = $("reportContent"); content.replaceChildren(); const terminated = report.report_status === "SESSION_TERMINATED";
+  const status = document.createElement("div"); status.className = `report-status ${terminated ? "terminated" : "completed"}`; status.textContent = terminated ? "SESSION TERMINATED" : "ASSESSMENT COMPLETED"; content.append(status);
+  const overview = document.createElement("section"); overview.className = "report-section"; overview.innerHTML = "<h3>Candidate & technical score</h3>"; reportRow(overview, "Candidate", report.candidate.name); reportRow(overview, "Email", report.candidate.email); reportRow(overview, "Technical score", `${report.technical_score.correct} / ${report.technical_score.total} correct (${report.technical_score.percent}%)`); reportRow(overview, "Assessment duration", "30 minutes"); content.append(overview);
+  if (report.warnings.length) { const alert = document.createElement("section"); alert.className = "report-warning"; const title = document.createElement("strong"); title.textContent = report.warnings[0].title; const message = document.createElement("p"); message.textContent = report.warnings[0].message; alert.append(title, message); content.append(alert); }
+  const incidents = document.createElement("section"); incidents.className = "report-section"; incidents.innerHTML = `<h3>${report.flagged_incidents.length ? "Integrity incidents" : "Integrity result"}</h3>`; if (report.flagged_incidents.length) { const list = document.createElement("ul"); list.className = "incident-list"; report.flagged_incidents.forEach((incident) => { const line = document.createElement("li"); line.textContent = `${incident.status.replaceAll("_", " ")} — ${incident.checks} confirmed check${incident.checks === 1 ? "" : "s"}.`; list.append(line); }); incidents.append(list); } else { const message = document.createElement("p"); message.textContent = "No integrity incidents were recorded."; incidents.append(message); } content.append(incidents);
+  const footer = document.createElement("p"); footer.className = "small"; footer.textContent = report.recommendation; content.append(footer);
+}
+function openReport(report) { if (!report) return; renderReport(report); $("reportModal").classList.remove("hidden"); }
+async function loadReviewerReports() { const response = await fetch(`${API}/api/reviewer/reports`); const data = await response.json(); const reports = data.reports || []; $("reportTotal").textContent = reports.length; $("completedTotal").textContent = reports.filter((report) => report.report_status === "ASSESSMENT_COMPLETED").length; $("terminatedTotal").textContent = reports.filter((report) => report.report_status === "SESSION_TERMINATED").length; const list = $("reportList"); list.replaceChildren(); if (!reports.length) { list.innerHTML = "<p class=\"muted\">No completed assessment reports have been saved yet.</p>"; return; } reports.forEach((report) => { const row = document.createElement("button"); row.className = "report-item"; const name = document.createElement("strong"); name.textContent = report.candidate.name; const score = document.createElement("span"); score.textContent = `${report.technical_score.percent}% · ${report.report_status === "SESSION_TERMINATED" ? "Terminated" : "Completed"}`; const action = document.createElement("span"); action.textContent = "View report →"; row.append(name, score, action); row.addEventListener("click", () => openReport(report)); list.append(row); }); }
+async function loadQuestions() { const response = await fetch(`${API}/api/assessment/questions`); const data = await response.json(); questions = data.questions; remainingSeconds = data.duration_minutes * 60; renderTimer(); }
+
+$("checkinForm").addEventListener("submit", (event) => { event.preventDefault(); if (!validCheckin()) return; setCandidateStage("preflightView"); });
+$("backToCheckin").addEventListener("click", () => setCandidateStage("welcomeView"));
+$("cameraButton").addEventListener("click", async () => { if (!validCheckin()) { setCandidateStage("welcomeView"); return; } try { show("Loading on-device camera checks…"); const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"); landmarker = await FaceLandmarker.createFromOptions(vision, { baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task" }, runningMode: "VIDEO", numFaces: 2 }); objectDetector = await ObjectDetector.createFromOptions(vision, { baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/latest/efficientdet_lite0.tflite" }, runningMode: "VIDEO", scoreThreshold: .45, categoryAllowlist: ["cell phone"] }); stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 640, height: 480 }, audio: false }); video.srcObject = stream; $("sideCamera").srcObject = stream; await video.play(); setRequirement("cameraRequirement", true); setRequirement("faceRequirement", true); setRequirement("phoneRequirement", true); $("cameraState").textContent = "Camera and integrity checks ready"; $("cameraButton").disabled = true; $("baseline").disabled = false; show("Ready. Keep only yourself in view and start calibration."); } catch (error) { show(`Device check failed: ${error.message}. Allow camera permission and confirm internet access for the required models.`); } });
+$("baseline").addEventListener("click", async () => { if (!landmarker || !objectDetector) return; setCandidateStage("calibrationView"); let attempts = 0, issue = ""; const samples = []; await new Promise((resolve) => { const timer = setInterval(() => { attempts += 1; const features = currentFeatures(); if (phoneDetected()) issue = "A mobile phone was detected."; else if (lastFaceCount > 1) issue = "More than one face was detected."; else if (features) samples.push(features); const seconds = Math.max(0, Math.ceil((40 - attempts) * .3)); $("calibrationCount").textContent = seconds; $("calibrationBar").style.width = `${attempts / 40 * 100}%`; if (issue || attempts >= 40) { clearInterval(timer); resolve(); } }, 300); }); if (issue || samples.length < 10) { setCandidateStage("preflightView"); show(`${issue || "Your face was not visible consistently."} Adjust your setup and start calibration again.`); return; } const response = await fetch(`${API}/api/assessment/start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ candidate: candidate(), samples }) }); const data = await response.json(); if (!response.ok) { setCandidateStage("preflightView"); show(data.error); return; } assessmentId = data.assessment_id; $("candidateGreeting").textContent = `${candidate().name}'s assessment`; setCandidateStage("examView"); renderQuestion(); startTimer(); monitoringTimer = setInterval(() => submitObservation(false), 2000); submitObservation(false); show("Assessment monitoring is active."); });
+$("previous").addEventListener("click", () => { if (questionIndex > 0) { questionIndex -= 1; renderQuestion(); } });
+$("next").addEventListener("click", () => { if (questionIndex < questions.length - 1) { questionIndex += 1; renderQuestion(); } else { complete(); } });
+$("submitButton").addEventListener("click", () => complete());
+$("viewReportAfterTermination").addEventListener("click", () => openReport(currentReport)); $("viewReportAfterCompletion").addEventListener("click", () => openReport(currentReport)); $("closeReport").addEventListener("click", () => $("reportModal").classList.add("hidden"));
+$("candidateNav").addEventListener("click", () => { $("candidatePortal").classList.remove("hidden"); $("reviewerPortal").classList.add("hidden"); $("candidateNav").classList.add("active"); $("reviewerNav").classList.remove("active"); });
+$("reviewerNav").addEventListener("click", async () => { $("candidatePortal").classList.add("hidden"); $("reviewerPortal").classList.remove("hidden"); $("reviewerNav").classList.add("active"); $("candidateNav").classList.remove("active"); await loadReviewerReports(); }); $("refreshReports").addEventListener("click", loadReviewerReports);
+document.addEventListener("visibilitychange", () => { if (assessmentId && !assessmentFinished && document.hidden) submitObservation(true); }); window.addEventListener("beforeunload", stopCamera);
+loadQuestions().catch(() => show("Could not load technical questions. Refresh and try again."));

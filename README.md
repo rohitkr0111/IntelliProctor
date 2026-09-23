@@ -1,15 +1,19 @@
-# IntelliProctor MVP
+# IntelliProctor — technical assessment MVP
 
-An explainable proctoring-review prototype that calibrates to an individual's own behavior before emitting an anomaly signal. A signal is **not** a cheating finding: any consequential action requires trained human review.
+IntelliProctor is a local 30-minute technical multiple-choice assessment with two distinct integrity layers:
 
-## What is included
+- **Personalized behavior baseline:** a 12-second on-device calibration creates an individual range for face/gaze/head landmark ratios. A session ends only after three sustained, very-high deviations from that candidate’s own baseline.
+- **Transparent fixed rules:** a confirmed mobile phone ends the session immediately; repeated multiple-face and browser-leave signals also end the session.
 
-- Statistical personalized baseline built from normalized landmark features.
-- Context adjustments that can reduce review burden when typing, responding to a hard question, or looking down.
-- Flask JSON API with in-memory, active-session-only data.
-- A browser demo with optional webcam calibration. MediaPipe derives landmarks in the browser; raw camera frames and identity templates are never posted to the API.
-- A contextual assessment prompt: only a local boolean for recent typing and selected difficulty are sent with a score; answer text never leaves the browser.
-- Unit tests for normal and strong-deviation cases.
+It is intentionally an assessment-session prototype, not a validated cheating detector. It cannot “ban” a person from their browser or prove intent. It terminates the server-side assessment session and produces evidence for a qualified human to review.
+
+## What the assessment includes
+
+- 30-minute timer in India Standard Time (`Asia/Kolkata`)
+- 10 server-owned MCQs across Python, algorithms, SQL, web, JavaScript, Git, testing, DevOps, databases, and concurrency
+- Server-side answer grading; answer keys are never sent to the browser
+- Candidate name, email, explicit storage consent, answers, technical score, grouped integrity incidents, and final report saved locally in SQLite
+- Client-side MediaPipe face-landmark and mobile-phone checks; raw video and face embeddings are not stored or uploaded
 
 ## Run locally
 
@@ -21,24 +25,25 @@ python -m unittest discover -s tests
 python backend/app.py
 ```
 
-Open `http://localhost:5000`.
+Open `http://localhost:5000`. On first camera use, the browser downloads MediaPipe models, so it needs internet access and camera permission.
 
-## API
+## Data stored locally
 
-`POST /api/assessment/start` accepts `{ "samples": [feature, ...] }`; each feature has `gaze_x`, `gaze_y`, `head_yaw`, `head_pitch`, `head_roll`, and `face_scale` numeric values.
+The database is `data/intelliproctor.db` (ignored by Git). It holds:
 
-`POST /api/assessment/score_frame` accepts an `assessment_id`, `features`, and optional non-sensitive `context` (`typing`, `difficulty`, `gaze_direction`). `GET /api/assessment/report?assessment_id=…` produces a compact review timeline.
+- candidate name, email, consent record, and session timestamps
+- submitted answer selections and computed technical score
+- calibration thresholds, grouped integrity incidents, and final report
 
-## Candidate experience
+It does **not** store raw camera footage or facial identity embeddings. Before real-world use, add user authentication, encryption at rest, retention/deletion controls, audit logging, access control, accessibility testing, bias/accuracy evaluation, an appeal process, and legal/privacy review.
 
-The browser samples derived landmarks about every two seconds to keep the session check current. It does **not** create a report for every sample: a report is generated only when the user chooses **View report**. Reports contain grouped flagged incidents rather than raw sample-by-sample data. The candidate sees a plain-language all-clear, a temporary camera check, or a warning after three consecutive elevated checks.
+## Integrity policy
 
-The API builds review and termination thresholds from the calibration distribution for that session, rather than fixed behavior rules (for example, “eyes away for N seconds”). It ends the session after three consecutive deviations above that personal termination range and rejects later scores. This guardrail is deliberately strict: ending a session is not a finding of wrongdoing, and any consequence requires qualified human review. Session timestamps use India Standard Time (`Asia/Kolkata`).
+| Signal | Action |
+| --- | --- |
+| Confirmed mobile phone | Terminate the assessment session immediately |
+| Two consecutive multiple-face checks | Terminate the assessment session |
+| Three repeated browser-hidden/window-leave checks | Terminate the assessment session |
+| Three consecutive very-high deviations from personal baseline | Terminate the assessment session |
 
-## Mobile-phone policy
-
-Behavioral monitoring cannot identify a phone. The browser therefore runs a separate on-device object detector for the `cell phone` class; no camera frame is sent to the server. A confirmed mobile-phone detection sends a policy signal to the API, which immediately ends the session and records one grouped `PROHIBITED_OBJECT` incident. The final summary presents a clear policy-warning message instead of raw JSON. Object detection is probabilistic, so a human must review the outcome.
-
-## Guardrails
-
-This is an MVP demonstration—not a validated cheating detector. Do not use it for automated employment, education, or disciplinary decisions. Before collecting real video, complete consent, retention/deletion, security, accessibility, bias, accuracy, and legal assessments with qualified stakeholders.
+Automatic termination is an integrity-policy action, not proof of misconduct. The final report is a decision-support artifact for human review.

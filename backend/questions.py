@@ -28,3 +28,10 @@ def grade_answers(answers: dict) -> tuple[int, int, list[dict]]:
         correct += int(is_correct)
         results.append({"question_id": question["id"], "selected_option": selected, "is_correct": is_correct})
     return correct, len(TECHNICAL_QUESTIONS), results
+
+
+def answer_is_correct(question_id: str, selected_option: object) -> bool | None:
+    for question in TECHNICAL_QUESTIONS:
+        if question["id"] == question_id:
+            return selected_option == question["answer"]
+    return None
