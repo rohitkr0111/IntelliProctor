@@ -35,6 +35,10 @@ The browser samples derived landmarks about every two seconds to keep the sessio
 
 The API builds review and termination thresholds from the calibration distribution for that session, rather than fixed behavior rules (for example, “eyes away for N seconds”). It ends the session after three consecutive deviations above that personal termination range and rejects later scores. This guardrail is deliberately strict: ending a session is not a finding of wrongdoing, and any consequence requires qualified human review. Session timestamps use India Standard Time (`Asia/Kolkata`).
 
+## Mobile-phone policy
+
+Behavioral monitoring cannot identify a phone. The browser therefore runs a separate on-device object detector for the `cell phone` class; no camera frame is sent to the server. A confirmed mobile-phone detection sends a policy signal to the API, which immediately ends the session and records one grouped `PROHIBITED_OBJECT` incident. The final summary presents a clear policy-warning message instead of raw JSON. Object detection is probabilistic, so a human must review the outcome.
+
 ## Guardrails
 
 This is an MVP demonstration—not a validated cheating detector. Do not use it for automated employment, education, or disciplinary decisions. Before collecting real video, complete consent, retention/deletion, security, accessibility, bias, accuracy, and legal assessments with qualified stakeholders.

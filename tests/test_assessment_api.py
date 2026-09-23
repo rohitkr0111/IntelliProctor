@@ -26,6 +26,21 @@ class AssessmentApiTests(unittest.TestCase):
         self.assertEqual(len(report["flagged_incidents"]), 1)
         self.assertNotIn("timeline", report)
 
+    def test_repeated_phone_detection_ends_session(self):
+        response = self.client.post("/api/assessment/score_frame", json={"assessment_id": self.assessment_id, "features": SAMPLE, "context": {"prohibited_object": True}})
+        self.assertTrue(response.json["session_ended"])
+        self.assertEqual(response.json["termination_reason"], "Mobile phone detected: prohibited-device policy violation.")
+        report = self.client.get(f"/api/assessment/report?assessment_id={self.assessment_id}").json
+        self.assertEqual(report["flagged_incidents"][0]["status"], "PROHIBITED_OBJECT")
+        self.assertEqual(report["report_status"], "SESSION_TERMINATED")
+        self.assertEqual(report["warnings"][0]["code"], "MOBILE_PHONE_DETECTED")
+
+    def test_finish_returns_completed_summary(self):
+        finished = self.client.post("/api/assessment/finish", json={"assessment_id": self.assessment_id})
+        self.assertEqual(finished.json["status"], "assessment_completed")
+        report = self.client.get(f"/api/assessment/report?assessment_id={self.assessment_id}").json
+        self.assertEqual(report["report_status"], "ASSESSMENT_COMPLETED")
+
 
 if __name__ == "__main__":
     unittest.main()

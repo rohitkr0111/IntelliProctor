@@ -1,9 +1,9 @@
-import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+import { FaceLandmarker, FilesetResolver, ObjectDetector } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
 const API = "";
 const $ = (id) => document.getElementById(id);
 const video = $("camera");
-let assessmentId, landmarker, stream, scoringTimer, countdownTimer, lastTypingAt = 0, elevatedSamples = 0, remainingSeconds = 600, assessmentFinished = false;
+let assessmentId, landmarker, objectDetector, stream, scoringTimer, countdownTimer, lastTypingAt = 0, elevatedSamples = 0, remainingSeconds = 600, assessmentFinished = false;
 
 function show(message) { $("message").textContent = message; }
 function renderTimer() { const minutes = String(Math.floor(remainingSeconds / 60)).padStart(2, "0"), seconds = String(remainingSeconds % 60).padStart(2, "0"); $("assessmentTimer").textContent = `${minutes}:${seconds}`; }
@@ -32,6 +32,11 @@ function currentFeatures() {
   const result = landmarker.detectForVideo(video, performance.now());
   return result.faceLandmarks?.[0] ? landmarkFeature(result.faceLandmarks[0]) : null;
 }
+function phoneDetected() {
+  if (!objectDetector || video.readyState < 2) return false;
+  const result = objectDetector.detectForVideo(video, performance.now());
+  return result.detections.some((detection) => detection.categories.some((category) => category.categoryName === "cell phone" && category.score >= 0.45));
+}
 function dot(score) { const item = document.createElement("i"); item.style.height = `${18 + score * 65}px`; item.className = score < .3 ? "low" : score < .6 ? "review" : "high"; $("timeline").append(item); }
 function updateSessionCheck(data) {
   const isNormal = data.status === "LOW_RISK";
@@ -48,26 +53,38 @@ function updateSessionCheck(data) {
   $("explanation").textContent = isNormal ? "No action needed." : "This is a session-quality prompt, not an accusation or automated decision.";
   $("warning").classList.toggle("hidden", elevatedSamples < 3);
 }
-function endSession() {
+function endSession(reason) {
   if (assessmentFinished) return;
   assessmentFinished = true; stopMonitoring(); clearInterval(countdownTimer); $("score").disabled = true; $("score").textContent = "Session ended"; $("finish").disabled = true;
   $("signalIcon").textContent = "■"; $("signalTitle").textContent = "This session has ended";
-  $("signalText").textContent = "A sustained, very large change from your personal calibration range was detected. Please contact the assessment supervisor for next steps.";
+  $("signalText").textContent = reason || "A sustained, very large change from your personal calibration range was detected. Please contact the assessment supervisor for next steps.";
   $("status").textContent = "SESSION ENDED"; $("status").className = "badge high";
   $("warningTitle").textContent = "Assessment session ended"; $("warningText").textContent = "Please stop the assessment and contact your supervisor. A human review is required."; $("warning").classList.remove("hidden"); stopCamera(); showReport();
 }
-async function showReport() { const response = await fetch(`${API}/api/assessment/report?assessment_id=${assessmentId}`); const data = await response.json(); $("reportBox").classList.remove("hidden"); $("reportContent").textContent = JSON.stringify(data, null, 2); }
+function renderReport(report) {
+  const content = $("reportContent"); content.replaceChildren();
+  const status = document.createElement("div"); const terminated = report.report_status === "SESSION_TERMINATED";
+  status.className = `report-status ${terminated ? "terminated" : "completed"}`;
+  status.textContent = terminated ? "SESSION TERMINATED" : report.report_status === "ASSESSMENT_COMPLETED" ? "ASSESSMENT COMPLETED" : "ASSESSMENT IN PROGRESS"; content.append(status);
+  for (const warning of report.warnings) { const item = document.createElement("div"); item.className = "report-warning"; const title = document.createElement("strong"); title.textContent = warning.title; const message = document.createElement("p"); message.textContent = warning.message; item.append(title, message); content.append(item); }
+  const heading = document.createElement("h3"); heading.textContent = report.flagged_incidents.length ? "Flagged incidents" : "No flagged incidents"; content.append(heading);
+  if (report.flagged_incidents.length) { const list = document.createElement("ul"); list.className = "incident-list"; for (const incident of report.flagged_incidents) { const line = document.createElement("li"); line.textContent = `${incident.status.replaceAll("_", " ")} — ${incident.checks} confirmed check${incident.checks === 1 ? "" : "s"}, from ${new Date(incident.started_at).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })}.`; list.append(line); } content.append(list); }
+  const note = document.createElement("p"); note.className = "small"; note.textContent = report.recommendation; content.append(note);
+}
+async function showReport() { const response = await fetch(`${API}/api/assessment/report?assessment_id=${assessmentId}`); const data = await response.json(); $("reportBox").classList.remove("hidden"); renderReport(data); }
 function startMonitoring() { if (scoringTimer || assessmentFinished) return; sendScore(); scoringTimer = setInterval(sendScore, 2000); $("score").textContent = "Pause session check"; }
-function finishAssessment(message = "Assessment submitted. Your grouped session summary is ready.") { if (assessmentFinished) return; assessmentFinished = true; stopMonitoring(); clearInterval(countdownTimer); $("score").disabled = true; $("score").textContent = "Assessment complete"; $("finish").disabled = true; $("status").textContent = "SUBMITTED"; $("status").className = "badge low"; $("signalIcon").textContent = "✓"; $("signalTitle").textContent = "Assessment submitted"; $("signalText").textContent = "Your response remains in this browser. The summary shows only grouped session incidents."; stopCamera(); show(message); showReport(); }
+async function finishAssessment(message = "Assessment submitted. Your grouped session summary is ready.") { if (assessmentFinished) return; assessmentFinished = true; stopMonitoring(); clearInterval(countdownTimer); $("score").disabled = true; $("score").textContent = "Assessment complete"; $("finish").disabled = true; $("status").textContent = "SUBMITTED"; $("status").className = "badge low"; $("signalIcon").textContent = "✓"; $("signalTitle").textContent = "Assessment submitted"; $("signalText").textContent = "Your response remains in this browser. The summary shows only grouped session incidents."; stopCamera(); show(message); await fetch(`${API}/api/assessment/finish`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assessment_id: assessmentId }) }); showReport(); }
 async function sendScore() {
   const features = currentFeatures();
   if (!features) return show("No face landmarks detected. Centre your face and improve lighting.");
   const typing = Date.now() - lastTypingAt < 2200;
   $("typingState").textContent = `Typing activity: ${typing ? "active" : "idle"} (local only)`;
-  const context = { typing, difficulty: $("difficulty").value, gaze_direction: "center" };
+  const prohibitedObject = phoneDetected();
+  const context = { typing, difficulty: $("difficulty").value, gaze_direction: "center", prohibited_object: prohibitedObject };
+  if (prohibitedObject) show("Mobile phone detected. Please remove it from the camera view immediately.");
   const response = await fetch(`${API}/api/assessment/score_frame`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assessment_id: assessmentId, features, context }) });
   const data = await response.json(); if (!response.ok) return show(data.error);
-  updateSessionCheck(data); dot(data.anomaly_score); $("report").disabled = false; if (data.session_ended) endSession();
+  updateSessionCheck(data); dot(data.anomaly_score); if (data.session_ended) endSession(data.termination_reason);
 }
 
 $("cameraButton").onclick = async () => {
@@ -75,8 +92,11 @@ $("cameraButton").onclick = async () => {
     show("Loading on-device face landmark model…");
     const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
     landmarker = await FaceLandmarker.createFromOptions(vision, { baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task" }, runningMode: "VIDEO", numFaces: 1 });
+    try {
+      objectDetector = await ObjectDetector.createFromOptions(vision, { baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/latest/efficientdet_lite0.tflite" }, runningMode: "VIDEO", scoreThreshold: 0.45, categoryAllowlist: ["cell phone"] });
+    } catch (objectError) { objectDetector = null; show("Camera is ready, but the mobile-phone detector could not load. Check your internet connection and restart the session."); }
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 640, height: 480 }, audio: false });
-    video.srcObject = stream; await video.play(); $("cameraState").textContent = "On-device landmark processing active";
+    video.srcObject = stream; await video.play(); $("cameraState").textContent = objectDetector ? "Face and mobile-phone detection active" : "Face detection active — phone detection unavailable";
     $("cameraButton").disabled = true; $("baseline").disabled = false; show("Camera ready. Begin calibration when you are comfortable.");
   } catch (error) { show(`Camera setup failed: ${error.message}. Allow camera permission and use a secure/local origin.`); }
 };
